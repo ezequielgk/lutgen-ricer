@@ -39,10 +39,10 @@ sync_palettes() {
             local nombre_base
             nombre_base=$(basename "$(dirname "$archivo")")
             [[ "$nombre_base" == *"$tmp_dir"* ]] && nombre_base="${archivo%.json}"
-            
+
             for variante in dark light; do
                 local colores
-                colores=$(jq -r ".[ \"$variante\" ] | [.mSurface, .mOnSurface, .mPrimary, .mSecondary, .mTertiary] | map(strings | sub(\"^#\"; \"\") | ascii_downcase) | unique | join(\" \")" "$archivo[...]
+                colores=$(jq -r ".[ \"$variante\" ] | [.mSurface, .mOnSurface, .mPrimary, .mSecondary, .mTertiary] | map(strings | sub(\"^#\"; \"\") | ascii_downcase) | unique | join(\" \")" "$archivo" 2>/dev/null)
                 if [[ -n "$colores" ]]; then
                     echo "$colores" > "$LUTGEN_DIR/${nombre_base,,}-${variante}"
                     echo -e "  ${C_GREEN}Synced:${C_RESET} ${nombre_base,,}-${variante}"
@@ -107,7 +107,7 @@ cp -r "$ORIGEN"/. "$DESTINO_FINAL"/
 echo -e "\n${C_BLUE}[*] Applying filters in '$DESTINO_FINAL'...${C_RESET}"
 find "$DESTINO_FINAL" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) | while IFS= read -r img; do
     [[ "${img,,}" == */light/* ]] && TEMA_NOMBRE="$TEMA_LIGHT" || TEMA_NOMBRE="$TEMA_DARK"
-    
+
     archivo_temp="${img}_lutgen_tmp.${img##*.}"
     if lutgen apply -p "${TEMA_NOMBRE,,}" "$img" -o "$archivo_temp" &>/dev/null; then
         mv "$archivo_temp" "$img"
@@ -116,5 +116,4 @@ find "$DESTINO_FINAL" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.
     fi
 done
 
-echo -e "\n${C_GREEN}[OK] Process completed. Wallpapers in: '$DESTINO_FINAL'${C_RESET}"
 echo -e "\n${C_GREEN}[OK] Process completed. Wallpapers in: '$DESTINO_FINAL'${C_RESET}"
