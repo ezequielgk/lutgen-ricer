@@ -10,6 +10,7 @@ C_BLUE="\e[1;34m"; C_GREEN="\e[1;32m"; C_RED="\e[1;31m"; C_YELLOW="\e[1;33m"; C_
 # Configuración
 REPO_URL="https://github.com/ezequielgk/noctalia-colorschemes"
 LUTGEN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lutgen"
+SYNC_MARKER="$LUTGEN_DIR/.synced"
 mkdir -p "$LUTGEN_DIR"
 
 # Funciones auxiliares
@@ -23,7 +24,13 @@ check_deps() {
 }
 
 sync_palettes() {
-    echo -e "${C_BLUE}[*] Sincronizando paletas desde GitHub...${C_RESET}"
+    # Si ya se sincronizó antes, saltar la descarga y avisar solamente
+    if [[ -f "$SYNC_MARKER" ]]; then
+        echo -e "${C_BLUE}[*] Temas sincronizados (cargados desde caché).${C_RESET}"
+        return
+    fi
+
+    echo -e "${C_BLUE}[*] Primera ejecución: sincronizando paletas desde GitHub...${C_RESET}"
     local tmp_dir
     tmp_dir=$(mktemp -d)
 
@@ -42,6 +49,8 @@ sync_palettes() {
                 fi
             done
         done
+        touch "$SYNC_MARKER"
+        echo -e "${C_GREEN}[OK] Todos los temas han sido sincronizados correctamente.${C_RESET}"
     else
         echo -e "${C_RED}[ERROR] Fallo al descargar paletas.${C_RESET}"
     fi
@@ -52,7 +61,7 @@ generate_toml() {
     local toml_file="$LUTGEN_DIR/palettes.toml"
     echo "" > "$toml_file"
     for file in "$LUTGEN_DIR/"*; do
-        if [ -f "$file" ] && [[ "$file" != *.toml ]]; then
+        if [ -f "$file" ] && [[ "$file" != *.toml ]] && [[ "$file" != *.synced ]]; then
             local name=$(basename "$file")
             local name_lower="${name,,}"
             local colores_toml
@@ -79,7 +88,7 @@ echo -e "\n${C_YELLOW}Modo de paleta:${C_RESET}"
 select TIPO in "Custom (Local)" "Integradas (Lutgen)"; do MODO=$REPLY; break; done
 
 if [[ "$MODO" == "1" ]]; then
-    mapfile -t esquemas < <(find "$LUTGEN_DIR" -maxdepth 1 -type f ! -name "*.toml" -exec basename {} \; | sed -E 's/-(dark|light)$//' | sort -u)
+    mapfile -t esquemas < <(find "$LUTGEN_DIR" -maxdepth 1 -type f ! -name "*.toml" ! -name ".synced" -exec basename {} \; | sed -E 's/-(dark|light)$//' | sort -u)
     select PALETA in "${esquemas[@]}"; do [[ -n "$PALETA" ]] && break; done
     generate_toml
     TEMA_DARK="${PALETA}-dark"; TEMA_LIGHT="${PALETA}-light"
@@ -107,4 +116,5 @@ find "$DESTINO_FINAL" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.
     fi
 done
 
+echo -e "\n${C_GREEN}[OK] Proceso finalizado. Fondos en: '$DESTINO_FINAL'${C_RESET}"
 echo -e "\n${C_GREEN}[OK] Proceso finalizado. Fondos en: '$DESTINO_FINAL'${C_RESET}"
