@@ -1,0 +1,110 @@
+#!/bin/bash
+# ==============================================================================
+# Lutgen Ricer (CLI)
+# Autor: Ezequiel (Zeke)
+# ==============================================================================
+
+# Variables de color
+C_BLUE="\e[1;34m"; C_GREEN="\e[1;32m"; C_RED="\e[1;31m"; C_YELLOW="\e[1;33m"; C_CYAN="\e[1;36m"; C_RESET="\e[0m"
+
+# Configuración
+REPO_URL="https://github.com/ezequielgk/noctalia-colorschemes"
+LUTGEN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lutgen"
+mkdir -p "$LUTGEN_DIR"
+
+# Funciones auxiliares
+check_deps() {
+    for cmd in lutgen jq curl tar; do
+        if ! command -v "$cmd" &> /dev/null; then
+            echo -e "${C_RED}[ERROR] '$cmd' no está instalado.${C_RESET}"
+            exit 1
+        fi
+    done
+}
+
+sync_palettes() {
+    echo -e "${C_BLUE}[*] Sincronizando paletas desde GitHub...${C_RESET}"
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+
+    if curl -sL "${REPO_URL%/}/archive/refs/heads/main.tar.gz" | tar -xz -C "$tmp_dir" --strip=1 &> /dev/null; then
+        find "$tmp_dir" -name "*.json" | while read -r archivo; do
+            local nombre_base
+            nombre_base=$(basename "$(dirname "$archivo")")
+            [[ "$nombre_base" == *"$tmp_dir"* ]] && nombre_base="${archivo%.json}"
+            
+            for variante in dark light; do
+                local colores
+                colores=$(jq -r ".[ \"$variante\" ] | [.mSurface, .mOnSurface, .mPrimary, .mSecondary, .mTertiary] | map(strings | sub(\"^#\"; \"\") | ascii_downcase) | unique | join(\" \")" "$archivo" 2>/dev/null)
+                if [[ -n "$colores" ]]; then
+                    echo "$colores" > "$LUTGEN_DIR/${nombre_base,,}-${variante}"
+                    echo -e "  ${C_GREEN}Sincronizada:${C_RESET} ${nombre_base,,}-${variante}"
+                fi
+            done
+        done
+    else
+        echo -e "${C_RED}[ERROR] Fallo al descargar paletas.${C_RESET}"
+    fi
+    rm -rf "$tmp_dir"
+}
+
+generate_toml() {
+    local toml_file="$LUTGEN_DIR/palettes.toml"
+    echo "" > "$toml_file"
+    for file in "$LUTGEN_DIR/"*; do
+        if [ -f "$file" ] && [[ "$file" != *.toml ]]; then
+            local name=$(basename "$file")
+            local name_lower="${name,,}"
+            local colores_toml
+            colores_toml=$(awk '{ for(i=1;i<=NF;i++) printf "\"%s\"%s", ($i ~ /^#/ ? $i : "#"$i), (i==NF ? "" : ", ") }' "$file")
+            echo "[\"$name_lower\"]" >> "$toml_file"
+            echo "colors = [$colores_toml]" >> "$toml_file"
+            echo "" >> "$toml_file"
+        fi
+    done
+}
+
+# Flujo principal
+check_deps
+sync_palettes
+
+# 1. Selección de carpeta origen
+mapfile -t carpetas < <(find . -maxdepth 1 -type d ! -name "." ! -name ".*" | sed 's|^\./||' | sort)
+echo -e "\n${C_YELLOW}Selecciona la carpeta origen:${C_RESET}"
+PS3="> Número: "
+select ORIGEN in "${carpetas[@]}"; do [[ -n "$ORIGEN" ]] && break; done
+
+# 2. Selección de modo y paleta
+echo -e "\n${C_YELLOW}Modo de paleta:${C_RESET}"
+select TIPO in "Custom (Local)" "Integradas (Lutgen)"; do MODO=$REPLY; break; done
+
+if [[ "$MODO" == "1" ]]; then
+    mapfile -t esquemas < <(find "$LUTGEN_DIR" -maxdepth 1 -type f ! -name "*.toml" -exec basename {} \; | sed -E 's/-(dark|light)$//' | sort -u)
+    select PALETA in "${esquemas[@]}"; do [[ -n "$PALETA" ]] && break; done
+    generate_toml
+    TEMA_DARK="${PALETA}-dark"; TEMA_LIGHT="${PALETA}-light"
+    DESTINO_BASE="$PALETA"
+else
+    mapfile -t esquemas_lutgen < <(lutgen palette names | sort)
+    select TEMA_DARK in "${esquemas_lutgen[@]}"; do [[ -n "$TEMA_DARK" ]] && break; done
+    TEMA_LIGHT="$TEMA_DARK"; DESTINO_BASE="$TEMA_DARK"
+fi
+
+# 3. Procesamiento
+DESTINO_FINAL="$DESTINO_BASE/$ORIGEN"
+mkdir -p "$DESTINO_FINAL"
+cp -r "$ORIGEN"/. "$DESTINO_FINAL"/
+
+echo -e "\n${C_BLUE}[*] Aplicando filtros en '$DESTINO_FINAL'...${C_RESET}"
+find "$DESTINO_FINAL" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) | while IFS= read -r img; do
+    [[ "${img,,}" == */light/* ]] && TEMA_NOMBRE="$TEMA_LIGHT" || TEMA_NOMBRE="$TEMA_DARK"
+    
+    archivo_temp="${img}_lutgen_tmp.${img##*.}"
+    if lutgen apply -p "${TEMA_NOMBRE,,}" "$img" -o "$archivo_temp" &>/dev/null; then
+        mv "$archivo_temp" "$img"
+    else
+        rm -f "$archivo_temp"
+    fi
+done
+
+echo -e "\n${C_GREEN}[OK] Proceso finalizado. Fondos en: '$DESTINO_FINAL'${C_RESET}"
