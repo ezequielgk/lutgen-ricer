@@ -1,36 +1,36 @@
 #!/bin/bash
 # ==============================================================================
 # Lutgen Ricer (CLI)
-# Autor: Ezequiel (Zeke)
+# Author: Ezequiel (Zeke)
 # ==============================================================================
 
-# Variables de color
+# Color variables
 C_BLUE="\e[1;34m"; C_GREEN="\e[1;32m"; C_RED="\e[1;31m"; C_YELLOW="\e[1;33m"; C_CYAN="\e[1;36m"; C_RESET="\e[0m"
 
-# Configuración
+# Configuration
 REPO_URL="https://github.com/ezequielgk/noctalia-colorschemes"
 LUTGEN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lutgen"
 SYNC_MARKER="$LUTGEN_DIR/.synced"
 mkdir -p "$LUTGEN_DIR"
 
-# Funciones auxiliares
+# Helper functions
 check_deps() {
     for cmd in lutgen jq curl tar; do
         if ! command -v "$cmd" &> /dev/null; then
-            echo -e "${C_RED}[ERROR] '$cmd' no está instalado.${C_RESET}"
+            echo -e "${C_RED}[ERROR] '$cmd' is not installed.${C_RESET}"
             exit 1
         fi
     done
 }
 
 sync_palettes() {
-    # Si ya se sincronizó antes, saltar la descarga y avisar solamente
+    # If already synced before, skip download and only notify
     if [[ -f "$SYNC_MARKER" ]]; then
-        echo -e "${C_BLUE}[*] Temas sincronizados (cargados desde caché).${C_RESET}"
+        echo -e "${C_BLUE}[*] Themes synced (loaded from cache).${C_RESET}"
         return
     fi
 
-    echo -e "${C_BLUE}[*] Primera ejecución: sincronizando paletas desde GitHub...${C_RESET}"
+    echo -e "${C_BLUE}[*] First run: syncing palettes from GitHub...${C_RESET}"
     local tmp_dir
     tmp_dir=$(mktemp -d)
 
@@ -42,17 +42,17 @@ sync_palettes() {
             
             for variante in dark light; do
                 local colores
-                colores=$(jq -r ".[ \"$variante\" ] | [.mSurface, .mOnSurface, .mPrimary, .mSecondary, .mTertiary] | map(strings | sub(\"^#\"; \"\") | ascii_downcase) | unique | join(\" \")" "$archivo" 2>/dev/null)
+                colores=$(jq -r ".[ \"$variante\" ] | [.mSurface, .mOnSurface, .mPrimary, .mSecondary, .mTertiary] | map(strings | sub(\"^#\"; \"\") | ascii_downcase) | unique | join(\" \")" "$archivo[...]
                 if [[ -n "$colores" ]]; then
                     echo "$colores" > "$LUTGEN_DIR/${nombre_base,,}-${variante}"
-                    echo -e "  ${C_GREEN}Sincronizada:${C_RESET} ${nombre_base,,}-${variante}"
+                    echo -e "  ${C_GREEN}Synced:${C_RESET} ${nombre_base,,}-${variante}"
                 fi
             done
         done
         touch "$SYNC_MARKER"
-        echo -e "${C_GREEN}[OK] Todos los temas han sido sincronizados correctamente.${C_RESET}"
+        echo -e "${C_GREEN}[OK] All themes have been synced successfully.${C_RESET}"
     else
-        echo -e "${C_RED}[ERROR] Fallo al descargar paletas.${C_RESET}"
+        echo -e "${C_RED}[ERROR] Failed to download palettes.${C_RESET}"
     fi
     rm -rf "$tmp_dir"
 }
@@ -73,19 +73,19 @@ generate_toml() {
     done
 }
 
-# Flujo principal
+# Main flow
 check_deps
 sync_palettes
 
-# 1. Selección de carpeta origen
+# 1. Select source folder
 mapfile -t carpetas < <(find . -maxdepth 1 -type d ! -name "." ! -name ".*" | sed 's|^\./||' | sort)
-echo -e "\n${C_YELLOW}Selecciona la carpeta origen:${C_RESET}"
-PS3="> Número: "
+echo -e "\n${C_YELLOW}Select the source folder:${C_RESET}"
+PS3="> Number: "
 select ORIGEN in "${carpetas[@]}"; do [[ -n "$ORIGEN" ]] && break; done
 
-# 2. Selección de modo y paleta
-echo -e "\n${C_YELLOW}Modo de paleta:${C_RESET}"
-select TIPO in "Custom (Local)" "Integradas (Lutgen)"; do MODO=$REPLY; break; done
+# 2. Select mode and palette
+echo -e "\n${C_YELLOW}Palette mode:${C_RESET}"
+select TIPO in "Custom (Local)" "Built-in (Lutgen)"; do MODO=$REPLY; break; done
 
 if [[ "$MODO" == "1" ]]; then
     mapfile -t esquemas < <(find "$LUTGEN_DIR" -maxdepth 1 -type f ! -name "*.toml" ! -name ".synced" -exec basename {} \; | sed -E 's/-(dark|light)$//' | sort -u)
@@ -99,12 +99,12 @@ else
     TEMA_LIGHT="$TEMA_DARK"; DESTINO_BASE="$TEMA_DARK"
 fi
 
-# 3. Procesamiento
+# 3. Processing
 DESTINO_FINAL="$DESTINO_BASE/$ORIGEN"
 mkdir -p "$DESTINO_FINAL"
 cp -r "$ORIGEN"/. "$DESTINO_FINAL"/
 
-echo -e "\n${C_BLUE}[*] Aplicando filtros en '$DESTINO_FINAL'...${C_RESET}"
+echo -e "\n${C_BLUE}[*] Applying filters in '$DESTINO_FINAL'...${C_RESET}"
 find "$DESTINO_FINAL" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \) | while IFS= read -r img; do
     [[ "${img,,}" == */light/* ]] && TEMA_NOMBRE="$TEMA_LIGHT" || TEMA_NOMBRE="$TEMA_DARK"
     
@@ -116,5 +116,5 @@ find "$DESTINO_FINAL" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.
     fi
 done
 
-echo -e "\n${C_GREEN}[OK] Proceso finalizado. Fondos en: '$DESTINO_FINAL'${C_RESET}"
-echo -e "\n${C_GREEN}[OK] Proceso finalizado. Fondos en: '$DESTINO_FINAL'${C_RESET}"
+echo -e "\n${C_GREEN}[OK] Process completed. Wallpapers in: '$DESTINO_FINAL'${C_RESET}"
+echo -e "\n${C_GREEN}[OK] Process completed. Wallpapers in: '$DESTINO_FINAL'${C_RESET}"
