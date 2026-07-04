@@ -24,7 +24,7 @@ chmod +x ricer
 
 ```bash
 mkdir -p ~/.local/bin
-mv ricer ~/.local/bin/ricewall
+mv ricer ~/.local/bin/ricer
 ```
 
 3. Make sure `~/.local/bin` is in your `$PATH`. If it isn't, add this to your shell configuration (e.g. `config.fish` or `.bashrc`):
@@ -38,7 +38,7 @@ fish_add_path ~/.local/bin
 Simply run the command in your terminal:
 
 ```bash
-ricewall
+ricer
 ```
 
 ### How it works:
