@@ -2,57 +2,71 @@
 
 # /*
 #  * LUTGEN RICER
-#  * Author: Ezequiel (Zeke)
+#  * Author: Ezequiel (Zeke), Mikuri12 (New Features)
 #  *
 #  * Interactive script for wallpaper ricing.
 #  * Flow managed via state machine to allow backtracking (ESC).
 #  */
 
-# //
-# // Color variables for logging
-# //
-
 C_BLUE="\e[1;34m"; C_GREEN="\e[1;32m"; C_RED="\e[1;31m"; C_YELLOW="\e[1;33m"; C_CYAN="\e[1;36m"; C_RESET="\e[0m"
-
-# //
-# // Base Configuration
-# //
 
 REPO_URL="https://github.com/ezequielgk/noctalia-colorschemes"
 LUTGEN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lutgen"
 SYNC_MARKER="$LUTGEN_DIR/.synced"
 
-# // Supported image extensions (webp included)
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/lutgen-ricer"
+STAMPS_DIR="$CACHE_DIR/stamps"
+MAX_JOBS="${MAX_JOBS:-4}"
+
+CONFIG_FILE="$LUTGEN_DIR/ricer.conf"
+CONFIG_NAME="ricer.conf"
+
+ALGORITHM="gaussian-blur"
+PRESERVE="false"
+LUM="1.0"
+SHAPE="128.0"
+NEAREST="16"
+LEVEL="10"
+RADIUS="8.0"
+
+SATURATION="100"
+CONTRAST="0"
+BRIGHTNESS="100"
+COLOR_STRENGTH="100"
+PALETTE_LIMIT="All"
+
+CURRENT_PALETTE="gruvbox-dark"
+SELECTED_COLORS=()
+SELECTED_FILES=()
+VARIANT_LIST=()
+
 IMG_PATTERN=(-iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp")
 
-# // Global fzf styling for UI consistency
+if command -v magick &>/dev/null; then
+    IM_CMD="magick"
+elif command -v convert &>/dev/null; then
+    IM_CMD="convert"
+else
+    IM_CMD="magick"
+fi
+
 export FZF_DEFAULT_OPTS="--layout=reverse --border=rounded --info=inline --prompt='❯ '"
 
-# // Ensure config directory exists before anything else
 mkdir -p "$LUTGEN_DIR"
-
-# /*
-#  * PREVIEW GENERATORS (TEMP SCRIPTS)
-#  * Using temporary files for fzf previews.
-#  * Trap handles cleanup when the script exits or is interrupted.
-#  */
 
 PREVIEW_SCRIPT=$(mktemp)
 LUTGEN_PREVIEW_SCRIPT=$(mktemp)
-trap 'rm -f "$PREVIEW_SCRIPT" "$LUTGEN_PREVIEW_SCRIPT"' EXIT SIGINT SIGTERM
-
-# //
-# // 1. Preview for local palettes (Generates ANSI TrueColor blocks)
-# //
+LIVE_PREVIEW_SCRIPT=$(mktemp)
+SAMPLE_IMAGE=""
+trap 'rm -f "$PREVIEW_SCRIPT" "$LUTGEN_PREVIEW_SCRIPT" "$LIVE_PREVIEW_SCRIPT"' EXIT SIGINT SIGTERM
 
 cat << 'EOF' > "$PREVIEW_SCRIPT"
 #!/usr/bin/env bash
 lutgen_dir="$1"
-shift # // Drop the first argument to iterate cleanly over the rest
+shift
 
 for item in "$@"; do
     files=()
-    # // Quick check: is it a direct file (Settings) or a base name (Selector)?
     if [[ -f "$lutgen_dir/$item" ]]; then
         files=("$item")
     else
@@ -60,21 +74,18 @@ for item in "$@"; do
     fi
 
     for file in "${files[@]}"; do
-        # // Skip silently if the variant doesn't exist
         [[ ! -f "$lutgen_dir/$file" ]] && continue
-        
-        # // Read hex values and build ANSI blocks
+
         read -r -a colors < "$lutgen_dir/$file"
         [[ ${#colors[@]} -eq 0 ]] && continue
 
-        echo -e "    Palette: $file\n"
+        echo -e "   Palette: $file\n"
 
         for _ in 1 2 3; do
             echo -n "  "
             for hex in "${colors[@]}"; do
-                hex="${hex//\#/}" # // Sanitize '#' just in case
+                hex="${hex//\#/}"
                 if [[ ${#hex} -eq 6 ]]; then
-                    # // Bash black magic to convert HEX to native RGB
                     r=$((16#${hex:0:2}))
                     g=$((16#${hex:2:2}))
                     b=$((16#${hex:4:2}))
@@ -89,10 +100,6 @@ done
 EOF
 chmod +x "$PREVIEW_SCRIPT"
 
-# //
-# // 2. Preview for Lutgen built-in palettes (Fast/Lightweight version)
-# //
-
 cat << 'EOF' > "$LUTGEN_PREVIEW_SCRIPT"
 #!/usr/bin/env bash
 palette="$1"
@@ -105,12 +112,187 @@ echo -e "\n  Use lutgen-studio for previews."
 EOF
 chmod +x "$LUTGEN_PREVIEW_SCRIPT"
 
+cat << 'EOF' > "$LIVE_PREVIEW_SCRIPT"
+#!/usr/bin/env bash
 
-# /*
-#  * CORE FUNCTIONS
-#  */
+main_preview() {
+    sample_img="$PREV_IMG"
+    lutgen_dir="$PREV_LUTGEN_DIR"
+    im_cmd="${PREV_IM_CMD:-magick}"
+    current_palette="$PREV_PALETTE"
+    custom_colors="$PREV_COLORS"
+    color_strength="${PREV_STRENGTH:-100}"
+    palette_limit="${PREV_LIMIT:-All}"
+    sat="${PREV_SAT:-100}"
+    contrast="${PREV_CONTRAST:-0}"
+    bright="${PREV_BRIGHT:-100}"
+    item_name="$1"
+    read -r -a lutgen_args <<< "$PREV_ARGS"
 
-# // Sanity check: prevent headaches by verifying dependencies upfront
+    local cache_dir="/tmp/lutgen_preview_cache"
+    mkdir -p "$cache_dir"
+
+    local stamp="${sample_img}#${current_palette}#${custom_colors}#${color_strength}#${palette_limit}#${sat}#${contrast}#${bright}#${PREV_ARGS}"
+    local stamp_hash
+    stamp_hash=$(printf '%s' "$stamp" | md5sum | cut -d' ' -f1)
+    local stamp_file="$cache_dir/stamp_${stamp_hash}"
+    local rendered_file="$cache_dir/rendered_${stamp_hash}.txt"
+
+    if [[ -f "$stamp_file" && -s "$rendered_file" && "$(< "$stamp_file")" == "$stamp" ]]; then
+        cat "$rendered_file"
+        return 0
+    fi
+
+    {
+        echo -e "\e[1;36m󰏘 Live Preview\e[0m"
+        echo -e "  \e[1;35m Palette:\e[0m $current_palette"
+        echo -e "  \e[1;32m Colors:\e[0m ${custom_colors:-Default (All)}"
+        echo -e "  \e[1;34m Strength:\e[0m ${color_strength}%  |  \e[1;34m Limit:\e[0m $palette_limit"
+        echo ""
+
+        if [[ -n "$sample_img" && -f "$sample_img" ]]; then
+            base_name=$(basename "$sample_img")
+            thumb="$cache_dir/thumb_${stamp_hash}.png"
+            out="$cache_dir/processed_${stamp_hash}.png"
+
+            if [[ ! -f "$thumb" || "$sample_img" -nt "$thumb" ]]; then
+                "$im_cmd" "$sample_img" -resize 400x400\> "$thumb" 2>/dev/null || cp "$sample_img" "$thumb"
+            fi
+
+            get_preview_sorted_palette() {
+                local pal="$1"
+                local raw=""
+                local file_cand=""
+                [[ -f "$lutgen_dir/${pal}-dark" ]] && file_cand="$lutgen_dir/${pal}-dark"
+                [[ -z "$file_cand" && -f "$lutgen_dir/$pal" ]] && file_cand="$lutgen_dir/$pal"
+                [[ -z "$file_cand" && -f "$lutgen_dir/${pal}-light" ]] && file_cand="$lutgen_dir/${pal}-light"
+                if [[ -n "$file_cand" ]]; then
+                    for w in $(< "$file_cand"); do
+                        w="${w//\"/}"; w="${w//,/}"; w="${w//#/}"
+                        [[ ${#w} -eq 6 && "$w" =~ ^[0-9a-fA-F]{6}$ ]] && raw+="#${w,,} "
+                    done
+                elif lutgen palette "$pal" &>/dev/null; then
+                    raw=$(lutgen palette "$pal" 2>/dev/null | grep -E "^#[0-9a-fA-F]{6}$")
+                elif lutgen palette "${pal}-dark" &>/dev/null; then
+                    raw=$(lutgen palette "${pal}-dark" 2>/dev/null | grep -E "^#[0-9a-fA-F]{6}$")
+                fi
+
+                [[ -z "$raw" ]] && return 1
+
+                local -a sorted=($(for c in $raw; do
+                    hex="${c//#/}"
+                    r=$((16#${hex:0:2}))
+                    g=$((16#${hex:2:2}))
+                    b=$((16#${hex:4:2}))
+                    lum=$(( (299 * r + 587 * g + 114 * b) / 1000 ))
+                    echo "$lum $c"
+                done | sort -n | awk '{print $2}'))
+                echo "${sorted[@]}"
+            }
+
+            apply_lutgen() {
+                local input="$1"
+                local output="$2"
+                local pal_name="$3"
+                local custom_hex="$4"
+
+                local -a p_opt=()
+                local -a c_args=()
+
+                if [[ -n "$custom_hex" ]]; then
+                    read -r -a hex_list <<< "$custom_hex"
+                    c_args=(-- "${hex_list[@]}")
+                else
+                    local -a sorted_pal=($(get_preview_sorted_palette "$pal_name"))
+                    case "${palette_limit:-All}" in
+                        2)
+                            if [[ ${#sorted_pal[@]} -ge 2 ]]; then
+                                c_args=(-- "${sorted_pal[0]}" "${sorted_pal[-1]}")
+                            else
+                                p_opt=(-p "${pal_name,,}")
+                            fi
+                            ;;
+                        4)
+                            if [[ ${#sorted_pal[@]} -ge 4 ]]; then
+                                local n=${#sorted_pal[@]}
+                                c_args=(-- "${sorted_pal[0]}" "${sorted_pal[$(( n / 3 ))]}" "${sorted_pal[$(( (2 * n) / 3 ))]}" "${sorted_pal[$(( n - 1 ))]}")
+                            else
+                                c_args=(-- "${sorted_pal[@]}")
+                            fi
+                            ;;
+                        8)
+                            if [[ ${#sorted_pal[@]} -ge 8 ]]; then
+                                local n=${#sorted_pal[@]}
+                                local -a subset=()
+                                for ((k=0; k<8; k++)); do
+                                    subset+=("${sorted_pal[$(( (k * (n - 1)) / 7 ))]}")
+                                done
+                                c_args=(-- "${subset[@]}")
+                            else
+                                c_args=(-- "${sorted_pal[@]}")
+                            fi
+                            ;;
+                        *)
+                            local cand="${pal_name,,}"
+                            if lutgen palette "$cand" &>/dev/null; then
+                                p_opt=(-p "$cand")
+                            elif lutgen palette "${cand}-dark" &>/dev/null; then
+                                p_opt=(-p "${cand}-dark")
+                            else
+                                if [[ ${#sorted_pal[@]} -gt 0 ]]; then
+                                    c_args=(-- "${sorted_pal[@]}")
+                                else
+                                    p_opt=(-p "$cand")
+                                fi
+                            fi
+                            ;;
+                    esac
+                fi
+
+                lutgen apply "${lutgen_args[@]}" "${p_opt[@]}" "$input" -o "$output" "${c_args[@]}"
+            }
+
+            err_log="$cache_dir/err_${stamp_hash}.log"
+            success=false
+
+            if apply_lutgen "$thumb" "$out" "$current_palette" "$custom_colors" &>"$err_log" && [[ -f "$out" ]]; then
+                success=true
+            fi
+
+            if [[ "$success" == "true" ]]; then
+                if (( 10#$color_strength < 100 )); then
+                    "$im_cmd" "$thumb" "$out" -define compose:args="$color_strength" -compose blend -composite "$out" 2>/dev/null
+                fi
+
+                if [[ "$sat" != "100" || "$contrast" != "0" || "$bright" != "100" ]]; then
+                    "$im_cmd" "$out" -modulate "${bright},${sat},100" -brightness-contrast "0x${contrast}" "$out" 2>/dev/null
+                fi
+
+                lines=${FZF_PREVIEW_LINES:-24}
+                cols=${FZF_PREVIEW_COLUMNS:-50}
+                chafa_lines=$(( lines > 8 ? lines - 6 : lines ))
+                chafa -f sixel -s "${cols}x${chafa_lines}" "$out" 2>/dev/null || chafa -s "${cols}x${chafa_lines}" "$out"
+                echo -e "\n  \e[2m[Sample: $base_name | Sat: ${sat}% | Cont: ${contrast} | Bri: ${bright}%]\e[0m"
+            else
+                chafa -f sixel -s "${FZF_PREVIEW_COLUMNS:-50}x${FZF_PREVIEW_LINES:-24}" "$thumb" 2>/dev/null || chafa "$thumb"
+                echo -e "\n  \e[1;31m[Notice: Could not render processed preview]\e[0m"
+                if [[ -f "$err_log" ]]; then
+                    head -n 2 "$err_log" | sed 's/^/  /'
+                fi
+            fi
+        else
+            echo -e "  \e[1;33m[!] No sample image found for live preview.\e[0m\n"
+        fi
+    } > "$rendered_file"
+
+    echo "$stamp" > "$stamp_file"
+    cat "$rendered_file"
+}
+
+main_preview "$1"
+EOF
+chmod +x "$LIVE_PREVIEW_SCRIPT"
+
 check_deps() {
     for cmd in lutgen jq curl tar fzf chafa; do
         if ! command -v "$cmd" &> /dev/null; then
@@ -118,28 +300,33 @@ check_deps() {
             exit 1
         fi
     done
+    if ! command -v magick &>/dev/null && ! command -v convert &>/dev/null; then
+        echo -e "${C_RED}[ERROR] Missing dependency: ImageMagick ('magick' or 'convert').${C_RESET}"
+        exit 1
+    fi
 }
-
-# // Sync Noctalia repo. Uses a cache flag to avoid spamming the GitHub API
 
 sync_palettes() {
     local force_sync="$1"
     if [[ -f "$SYNC_MARKER" && "$force_sync" != "true" ]]; then
-        return # // Already cached, exit early
+        return
     fi
 
     echo -e "${C_BLUE}[*] Syncing palettes from GitHub...${C_RESET}"
-    local tmp_dir=$(mktemp -d)
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
 
-    # // Download tarball and extract on-the-fly
     if curl -sL "${REPO_URL%/}/archive/refs/heads/main.tar.gz" | tar -xz -C "$tmp_dir" --strip=1 &> /dev/null; then
         find "$tmp_dir" -name "*.json" | while read -r file; do
-            local base_name=$(basename "$(dirname "$file")")
-            [[ "$base_name" == *"$tmp_dir"* ]] && base_name="${file%.json}"
+            local base_name
+            base_name=$(basename "$(dirname "$file")")
+            if [[ "$(dirname "$file")" == "$tmp_dir" ]]; then
+                base_name=$(basename "$file" .json)
+            fi
 
-            # // Parse JSON with jq and extract only the required hex values
             for variant in dark light; do
-                local colors=$(jq -r ".[ \"$variant\" ] | [.mSurface, .mOnSurface, .mPrimary, .mSecondary, .mTertiary] | map(strings | sub(\"^#\"; \"\") | ascii_downcase) | unique | join(\" \")" "$file" 2>/dev/null)
+                local colors
+                colors=$(jq -r ".[ \"$variant\" ] | [.mSurface, .mOnSurface, .mPrimary, .mSecondary, .mTertiary] | map(strings | sub(\"^#\"; \"\") | ascii_downcase) | unique | join(\" \")" "$file" 2>/dev/null)
                 if [[ -n "$colors" ]]; then
                     echo "$colors" > "$LUTGEN_DIR/${base_name,,}-${variant}"
                 fi
@@ -155,16 +342,16 @@ sync_palettes() {
     rm -rf "$tmp_dir"
 }
 
-# // Regenerate lutgen config file based on our local text files
-
 generate_toml() {
     local toml_file="$LUTGEN_DIR/palettes.toml"
-    > "$toml_file" # // Truncate file
+    > "$toml_file"
 
     for file in "$LUTGEN_DIR/"*; do
-        if [ -f "$file" ] && [[ "$file" != *.toml ]] && [[ "$file" != *.synced ]]; then
-            local name=$(basename "$file")
-            local colors_toml=$(awk '{ for(i=1;i<=NF;i++) printf "\"%s\"%s", ($i ~ /^#/ ? $i : "#"$i), (i==NF ? "" : ", ") }' "$file")
+        if [ -f "$file" ] && [[ "$file" != *.toml ]] && [[ "$file" != *.synced ]] && [[ "$file" != "$CONFIG_FILE" ]]; then
+            local name
+            name=$(basename "$file")
+            local colors_toml
+            colors_toml=$(awk '{ for(i=1;i<=NF;i++) printf "\"%s\"%s", ($i ~ /^#/ ? $i : "#"$i), (i==NF ? "" : ", ") }' "$file")
             echo "[\"${name,,}\"]" >> "$toml_file"
             echo "colors = [$colors_toml]" >> "$toml_file"
             echo "" >> "$toml_file"
@@ -172,36 +359,841 @@ generate_toml() {
     done
 }
 
-# // Core processing logic
-# // Returns: 0=Processed, 1=Skipped (cache hit), 2=Lutgen error
+load_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        save_config
+        return
+    fi
+
+    local key val
+    while IFS='=' read -r key val; do
+        key="${key// /}"
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        val="${val%$'\r'}"
+
+        case "$key" in
+            ALGORITHM)  [[ "$val" =~ ^(gaussian-blur|gaussian-rbf|gaussian-sampling|shepards|nearest-neighbor)$ ]] && ALGORITHM="$val" ;;
+            PRESERVE)   [[ "$val" =~ ^(true|false)$ ]] && PRESERVE="$val" ;;
+            LUM)        [[ "$val" =~ ^[0-9]+([.][0-9]+)?$ ]] && LUM="$val" ;;
+            SHAPE)      [[ "$val" =~ ^[0-9]+([.][0-9]+)?$ ]] && SHAPE="$val" ;;
+            NEAREST)    [[ "$val" =~ ^[0-9]+$ ]] && NEAREST="$val" ;;
+            LEVEL)      [[ "$val" =~ ^([2-9]|1[0-6])$ ]] && LEVEL="$val" ;;
+            RADIUS)     [[ "$val" =~ ^[0-9]+([.][0-9]+)?$ ]] && RADIUS="$val" ;;
+            SATURATION)     [[ "$val" =~ ^[0-9]+$ ]] && SATURATION="$val" ;;
+            CONTRAST)       [[ "$val" =~ ^-?[0-9]+$ ]] && CONTRAST="$val" ;;
+            BRIGHTNESS)     [[ "$val" =~ ^[0-9]+$ ]] && BRIGHTNESS="$val" ;;
+            COLOR_STRENGTH) [[ "$val" =~ ^[0-9]+$ ]] && COLOR_STRENGTH="$val" ;;
+            PALETTE_LIMIT)  [[ "$val" =~ ^(All|8|4|2)$ ]] && PALETTE_LIMIT="$val" ;;
+        esac
+    done < "$CONFIG_FILE"
+    return 0
+}
+
+save_config() {
+    cat > "$CONFIG_FILE" << EOF
+ALGORITHM=$ALGORITHM
+PRESERVE=$PRESERVE
+LUM=$LUM
+SHAPE=$SHAPE
+NEAREST=$NEAREST
+LEVEL=$LEVEL
+RADIUS=$RADIUS
+SATURATION=$SATURATION
+CONTRAST=$CONTRAST
+BRIGHTNESS=$BRIGHTNESS
+COLOR_STRENGTH=$COLOR_STRENGTH
+PALETTE_LIMIT=$PALETTE_LIMIT
+EOF
+}
+
+build_lutgen_args() {
+    LUTGEN_ARGS=()
+
+    case "$ALGORITHM" in
+        gaussian-rbf)      LUTGEN_ARGS+=(-R) ;;
+        gaussian-sampling) LUTGEN_ARGS+=(-G) ;;
+        shepards)          LUTGEN_ARGS+=(-S) ;;
+        nearest-neighbor)  LUTGEN_ARGS+=(-N) ;;
+    esac
+
+    case "$ALGORITHM" in
+        gaussian-rbf)
+            LUTGEN_ARGS+=(--shape "$SHAPE" --nearest "$NEAREST")
+            ;;
+        shepards)
+            LUTGEN_ARGS+=(--nearest "$NEAREST")
+            ;;
+        gaussian-blur)
+            LUTGEN_ARGS+=(--radius "$RADIUS")
+            ;;
+    esac
+
+    LUTGEN_ARGS+=(--level "$LEVEL")
+    [[ "$PRESERVE" == "true" ]] && LUTGEN_ARGS+=(--preserve)
+    LUTGEN_ARGS+=(--lum "$LUM")
+}
+
+reset_settings() {
+    ALGORITHM="gaussian-blur"; PRESERVE="false"; LUM="1.0"; SHAPE="128.0"; NEAREST="16"; LEVEL="10"; RADIUS="8.0"
+    SATURATION="100"; CONTRAST="0"; BRIGHTNESS="100"; COLOR_STRENGTH="100"; PALETTE_LIMIT="All"
+    save_config
+}
+
+get_sample_image() {
+    if [[ -n "$SAMPLE_IMAGE" && -f "$SAMPLE_IMAGE" ]]; then
+        echo "$SAMPLE_IMAGE"
+        return 0
+    fi
+    if [[ ${#SELECTED_FILES[@]} -gt 0 && -f "${SELECTED_FILES[0]}" ]]; then
+        echo "${SELECTED_FILES[0]}"
+        return 0
+    fi
+    local found
+    found=$(find . -maxdepth 2 -type f \( "${IMG_PATTERN[@]}" \) 2>/dev/null | head -n 1)
+    if [[ -n "$found" && -f "$found" ]]; then
+        echo "$found"
+        return 0
+    fi
+    echo ""
+}
+
+get_palette_hex_colors() {
+    local palette="$1"
+    local max_colors="${2:-4}"
+    local cand="${palette,,}"
+
+    local file_cand=""
+    if [[ -f "$LUTGEN_DIR/${cand}-dark" ]]; then
+        file_cand="$LUTGEN_DIR/${cand}-dark"
+    elif [[ -f "$LUTGEN_DIR/$cand" ]]; then
+        file_cand="$LUTGEN_DIR/$cand"
+    elif [[ -f "$LUTGEN_DIR/${cand}-light" ]]; then
+        file_cand="$LUTGEN_DIR/${cand}-light"
+    elif [[ -f "$LUTGEN_DIR/${cand// /-}-dark" ]]; then
+        file_cand="$LUTGEN_DIR/${cand// /-}-dark"
+    elif [[ -f "$LUTGEN_DIR/${cand%-dark}-dark" ]]; then
+        file_cand="$LUTGEN_DIR/${cand%-dark}-dark"
+    fi
+
+    if [[ -n "$file_cand" ]]; then
+        local raw
+        raw=$(< "$file_cand")
+        local count=0
+        for word in $raw; do
+            word="${word//\"/}"
+            word="${word//,/}"
+            word="${word//#/}"
+            if [[ ${#word} -eq 6 && "$word" =~ ^[0-9a-fA-F]{6}$ ]]; then
+                echo "#${word,,}"
+                count=$((count + 1))
+                if [[ "$max_colors" -gt 0 && "$count" -ge "$max_colors" ]]; then
+                    return 0
+                fi
+            fi
+        done
+        [[ $count -gt 0 ]] && return 0
+    fi
+
+    local raw_builtin=""
+    if lutgen palette "$cand" &>/dev/null; then
+        raw_builtin=$(lutgen palette "$cand" 2>/dev/null | grep -E '^#[0-9a-fA-F]{6}$')
+    elif lutgen palette "${cand}-dark" &>/dev/null; then
+        raw_builtin=$(lutgen palette "${cand}-dark" 2>/dev/null | grep -E '^#[0-9a-fA-F]{6}$')
+    fi
+
+    if [[ -n "$raw_builtin" ]]; then
+        local -a b_colors=($raw_builtin)
+        local n=${#b_colors[@]}
+        if [[ "$max_colors" -gt 0 && $n -gt $max_colors ]]; then
+            local -a sampled=()
+            for ((k=0; k<max_colors; k++)); do
+                sampled+=("${b_colors[$(( (k * (n - 1)) / (max_colors - 1) ))]}")
+            done
+            printf "%s\n" "${sampled[@]}"
+        else
+            printf "%s\n" "${b_colors[@]}"
+        fi
+        return 0
+    fi
+
+    return 1
+}
+
+get_palette_colors_sorted() {
+    local pal="$1"
+    local raw
+    raw=$(get_palette_hex_colors "$pal" 0)
+    [[ -z "$raw" ]] && return 1
+
+    local -a sorted=($(for c in $raw; do
+        hex="${c//#/}"
+        r=$((16#${hex:0:2}))
+        g=$((16#${hex:2:2}))
+        b=$((16#${hex:4:2}))
+        lum=$(( (299 * r + 587 * g + 114 * b) / 1000 ))
+        echo "$lum $c"
+    done | sort -n | awk '{print $2}'))
+    echo "${sorted[@]}"
+}
+
+pick_palette_colors() {
+    local pal_to_query="$CURRENT_PALETTE"
+
+    local raw_colors
+    raw_colors=$(get_palette_hex_colors "$pal_to_query")
+    if [[ -z "$raw_colors" ]]; then
+        echo -e "${C_YELLOW}[!] Could not retrieve colors for '$pal_to_query'.${C_RESET}"
+        sleep 1
+        return 0
+    fi
+
+    local -a pal_colors=()
+    declare -A seen=()
+    while read -r line; do
+        if [[ -n "$line" && -z "${seen["$line"]}" ]]; then
+            seen["$line"]=1
+            pal_colors+=("$line")
+        fi
+    done <<< "$raw_colors"
+
+    if [[ ${#pal_colors[@]} -eq 0 ]]; then
+        echo -e "${C_YELLOW}[!] No colors found in '$pal_to_query'.${C_RESET}"
+        sleep 1
+        return 0
+    fi
+
+    declare -A is_selected=()
+    if [[ ${#SELECTED_COLORS[@]} -gt 0 ]]; then
+        for c in "${SELECTED_COLORS[@]}"; do
+            is_selected["$c"]=1
+        done
+    else
+        for c in "${pal_colors[@]}"; do
+            is_selected["$c"]=1
+        done
+    fi
+
+    local cursor_pos=4  # Start on the first color (after Confirm, Select All, Deselect All)
+
+    while true; do
+        local count_sel=0
+        for c in "${pal_colors[@]}"; do
+            [[ -n "${is_selected["$c"]}" ]] && count_sel=$((count_sel + 1))
+        done
+
+        local menu_lines=()
+        menu_lines+=(" [ Confirm selection ($count_sel/${#pal_colors[@]} selected) ]")
+        menu_lines+=("● [ Select all colors ]")
+        menu_lines+=("○ [ Deselect all colors ]")
+
+        for hex in "${pal_colors[@]}"; do
+            local mark=" "
+            [[ -n "${is_selected["$hex"]}" ]] && mark="●"
+
+            local r=$((16#${hex:1:2}))
+            local g=$((16#${hex:3:2}))
+            local b=$((16#${hex:5:2}))
+
+            local line_str
+            line_str=$(printf "  [%s]  \e[48;2;%d;%d;%dm        \e[0m  %s" "$mark" "$r" "$g" "$b" "$hex")
+            menu_lines+=("$line_str")
+        done
+
+        local out
+        out=$(printf '%s\n' "${menu_lines[@]}" | fzf --ansi \
+            --prompt=" Colors [${pal_to_query}] ❯ " \
+            --header="[ENTER / SPACE]: Toggle color  |  [CTRL-A]: All  |  [CTRL-D]: None  |  [ESC]: Back" \
+            --expect=space,ctrl-a,ctrl-d,ctrl-r,tab \
+            --bind="start:pos($cursor_pos)")
+
+        local ret=$?
+        [[ $ret -ne 0 && -z "$out" ]] && return 0
+
+        local key item
+        key=$(head -n 1 <<< "$out")
+        item=$(tail -n +2 <<< "$out")
+        [[ -z "$item" ]] && item="$key"
+
+        [[ -z "$item" ]] && return 0
+
+        local chosen_idx=1
+        for i in "${!menu_lines[@]}"; do
+            local clean_menu
+            clean_menu=$(sed 's/\x1b\[[0-9;]*m//g' <<< "${menu_lines[$i]}")
+            local clean_item
+            clean_item=$(sed 's/\x1b\[[0-9;]*m//g' <<< "$item")
+            if [[ "$clean_menu" == "$clean_item" ]]; then
+                chosen_idx=$((i + 1))
+                break
+            fi
+        done
+        cursor_pos=$chosen_idx
+
+        if [[ "$key" == "ctrl-a" ]]; then
+            for c in "${pal_colors[@]}"; do is_selected["$c"]=1; done
+            continue
+        elif [[ "$key" == "ctrl-d" ]]; then
+            for c in "${pal_colors[@]}"; do unset "is_selected[$c]"; done
+            continue
+        elif [[ "$key" == "ctrl-r" ]]; then
+            for c in "${pal_colors[@]}"; do is_selected["$c"]=1; done
+            continue
+        fi
+
+        case "$item" in
+            *""*)
+                SELECTED_COLORS=()
+                if [[ $count_sel -eq 0 || $count_sel -eq ${#pal_colors[@]} ]]; then
+                    SELECTED_COLORS=()
+                    echo -e "${C_CYAN}[i] Using all palette colors.${C_RESET}"
+                else
+                    for c in "${pal_colors[@]}"; do
+                        [[ -n "${is_selected["$c"]}" ]] && SELECTED_COLORS+=("$c")
+                    done
+                    echo -e "${C_GREEN}[OK] Set to ${#SELECTED_COLORS[@]} selected colors.${C_RESET}"
+                fi
+                sleep 0.5
+                return 0
+                ;;
+            *"● [ Select all"*)
+                for c in "${pal_colors[@]}"; do is_selected["$c"]=1; done
+                ;;
+            *"○ [ Deselect all"*)
+                for c in "${pal_colors[@]}"; do unset "is_selected[$c]"; done
+                ;;
+            *)
+                local hex_code
+                hex_code=$(echo "$item" | grep -oE '#[0-9a-fA-F]{6}')
+                if [[ -n "$hex_code" ]]; then
+                    if [[ -n "${is_selected["$hex_code"]}" ]]; then
+                        unset "is_selected[$hex_code]"
+                    else
+                        is_selected["$hex_code"]=1
+                    fi
+                fi
+                if [[ "$key" == "tab" ]]; then
+                    cursor_pos=$((chosen_idx < ${#menu_lines[@]} ? chosen_idx + 1 : chosen_idx))
+                fi
+                ;;
+        esac
+    done
+}
+
+pick_palette_interactive() {
+    local current_val="$CURRENT_PALETTE"
+
+    local source_type
+    source_type=$(printf "1. Custom (Local Repository)\n2. Built-in (Lutgen Native)" | \
+        fzf --prompt="  Palette Source ❯ " --header="[ESC]: Keep '$current_val'")
+    [[ -z "$source_type" ]] && return 0
+
+    local chosen=""
+    if [[ "$source_type" == 1* ]]; then
+        mapfile -t schemes < <(find "$LUTGEN_DIR" -maxdepth 1 -type f ! -name "*.toml" ! -name ".synced" ! -name "$CONFIG_NAME" -exec basename {} \; 2>/dev/null | sed -E 's/-(dark|light)$//' | sort -u)
+        if [[ ${#schemes[@]} -eq 0 ]]; then
+            echo -e "${C_YELLOW}[!] No custom palettes found. Sync first (main menu, option 3).${C_RESET}"
+            sleep 1.5
+            return 0
+        fi
+        chosen=$(printf "%s\n" "${schemes[@]}" | fzf \
+            --prompt="  Select Custom Palette ❯ " \
+            --header="[ESC]: Cancel" \
+            --preview "'$PREVIEW_SCRIPT' '$LUTGEN_DIR' {}" \
+            --preview-window=right:50%:border-left)
+    else
+        mapfile -t lutgen_schemes < <(lutgen palette names 2>/dev/null | sort)
+        chosen=$(printf "%s\n" "${lutgen_schemes[@]}" | fzf \
+            --prompt="󰏘  Select Built-in Palette ❯ " \
+            --header="[ESC]: Cancel" \
+            --preview "'$LUTGEN_PREVIEW_SCRIPT' {}" \
+            --preview-window=right:50%:border-left)
+    fi
+
+    if [[ -n "$chosen" ]]; then
+        CURRENT_PALETTE="$chosen"
+        SELECTED_COLORS=()
+        generate_toml
+        echo -e "${C_GREEN}[OK] Palette set to $CURRENT_PALETTE.${C_RESET}"
+        sleep 0.5
+    fi
+}
+
+prompt_setting_value() {
+    local label="$1" current="$2" presets="$3" regex="$4"
+    local out query selected choice ret
+
+    out=$(printf "%s\n" $presets | fzf --prompt="$label ❯ " \
+        --header="Current: $current | Select or type new value, then [ENTER] | [ESC]: Cancel" \
+        --print-query)
+    ret=$?
+
+    [[ $ret -ne 0 ]] && return 1
+    [[ -z "$out" ]] && return 1
+
+    query=$(head -n 1 <<< "$out")
+    selected=$(tail -n 1 <<< "$out")
+
+    choice="$selected"
+    if [[ -n "$query" && "$query" != "$selected" ]]; then
+        choice="$query"
+    fi
+
+    [[ -z "$choice" ]] && return 1
+
+    if [[ -n "$regex" && ! "$choice" =~ $regex ]]; then
+        echo -e "${C_RED}[!] Invalid value: '$choice'.${C_RESET}"
+        sleep 1
+        return 1
+    fi
+
+    echo "$choice"
+}
+
+resolve_theme_variants() {
+    local pal="$CURRENT_PALETTE"
+    local base="${pal%-dark}"
+    base="${base%-light}"
+
+    DEST_BASE="$base"
+
+    if [[ -f "$LUTGEN_DIR/${base}-dark" && -f "$LUTGEN_DIR/${base}-light" ]]; then
+        THEME_DARK="${base}-dark"
+        THEME_LIGHT="${base}-light"
+        return
+    fi
+
+    if lutgen palette "${base}-dark" &>/dev/null && lutgen palette "${base}-light" &>/dev/null; then
+        THEME_DARK="${base}-dark"
+        THEME_LIGHT="${base}-light"
+        return
+    fi
+
+    if [[ "$pal" == *"-dark" ]]; then
+        THEME_DARK="$pal"
+        local light_cand="${pal%-dark}-light"
+        if [[ -f "$LUTGEN_DIR/$light_cand" ]] || lutgen palette "$light_cand" &>/dev/null; then
+            THEME_LIGHT="$light_cand"
+        else
+            THEME_LIGHT="$pal"
+        fi
+        return
+    fi
+
+    if [[ "$pal" == *"-light" ]]; then
+        THEME_LIGHT="$pal"
+        local dark_cand="${pal%-light}-dark"
+        if [[ -f "$LUTGEN_DIR/$dark_cand" ]] || lutgen palette "$dark_cand" &>/dev/null; then
+            THEME_DARK="$dark_cand"
+        else
+            THEME_DARK="$pal"
+        fi
+        return
+    fi
+
+    THEME_DARK="$pal"
+    THEME_LIGHT="$pal"
+}
+
+interactive_tune_settings() {
+    local sample_img="$1"
+    local title_context="${2:-Wallpaper}"
+
+    [[ -z "$sample_img" || ! -f "$sample_img" ]] && sample_img=$(get_sample_image)
+
+    local cursor_pos=1
+
+    while true; do
+        build_lutgen_args
+
+        local preserve_str="[ OFF ]"
+        [[ "$PRESERVE" == "true" ]] && preserve_str="[ ON  ]"
+
+        local color_status="All colors"
+        if [[ ${#SELECTED_COLORS[@]} -gt 0 ]]; then
+            color_status="${#SELECTED_COLORS[@]} colors selected"
+        fi
+
+        export PREV_IMG="$sample_img"
+        export PREV_LUTGEN_DIR="$LUTGEN_DIR"
+        export PREV_IM_CMD="$IM_CMD"
+        export PREV_PALETTE="$CURRENT_PALETTE"
+        export PREV_COLORS="${SELECTED_COLORS[*]}"
+        export PREV_STRENGTH="$COLOR_STRENGTH"
+        export PREV_LIMIT="$PALETTE_LIMIT"
+        export PREV_SAT="$SATURATION"
+        export PREV_CONTRAST="$CONTRAST"
+        export PREV_BRIGHT="$BRIGHTNESS"
+        export PREV_ARGS="${LUTGEN_ARGS[*]}"
+
+        local menu_lines=()
+        menu_lines+=(" [ Continue with these settings ❯ ]")
+        menu_lines+=("  Palette                : <  $CURRENT_PALETTE  >  (Enter to change)")
+        menu_lines+=("  Palette Colors         : <  $color_status  >  (Enter to select/deselect)")
+        menu_lines+=("  Color Strength         : <  ${COLOR_STRENGTH}%  >  (Enter to change)")
+        menu_lines+=("  Palette Colors Limit   : <  $PALETTE_LIMIT  >  (Enter to change)")
+        menu_lines+=("󰅚  Saturation             : <  ${SATURATION}%  >  (Enter to change)")
+        menu_lines+=("󰃠  Contrast               : <  ${CONTRAST}  >  (Enter to change)")
+        menu_lines+=("󰃟  Brightness             : <  ${BRIGHTNESS}%  >  (Enter to change)")
+        menu_lines+=("  Preserve luminosity    : $preserve_str  (Enter to toggle)")
+        menu_lines+=("󰃞  Luminosity factor      : <  $LUM  >  (Enter to change)")
+        menu_lines+=("  Algorithm              : <  $ALGORITHM  >  (Enter to change)")
+        menu_lines+=("󰁨  Radius (blur only)     : <  $RADIUS  >  (Enter to change)")
+        menu_lines+=("󰁨  Shape (RBF only)       : <  $SHAPE  >  (Enter to change)")
+        menu_lines+=("󰁨  Nearest colors         : <  $NEAREST  >  (Enter to change)")
+        menu_lines+=("󰁨  Hald CLUT level        : <  $LEVEL  >  (Enter to change)")
+        menu_lines+=("   Reset to defaults")
+
+        local item
+        item=$(printf '%s\n' "${menu_lines[@]}" \
+            | fzf --prompt="  Tuning: ${title_context} ❯ " \
+                  --header="[ENTER]: Change setting / Continue  |  [ESC]: Back" \
+                  --bind="start:pos($cursor_pos)" \
+                  --preview "'$LIVE_PREVIEW_SCRIPT'" \
+                  --preview-window=right:55%:border-left)
+
+        local ret=$?
+        [[ $ret -ne 0 && -z "$item" ]] && return 1
+        [[ -z "$item" ]] && return 1
+
+        case "$item" in
+            *"Continue"*)             cursor_pos=1 ;;
+            *"Colors Limit"*)         cursor_pos=5 ;;
+            *"Palette Colors"*)       cursor_pos=3 ;;
+            *"Palette"*)              cursor_pos=2 ;;
+            *"Color Strength"*)       cursor_pos=4 ;;
+            *"Saturation"*)           cursor_pos=6 ;;
+            *"Contrast"*)             cursor_pos=7 ;;
+            *"Brightness"*)           cursor_pos=8 ;;
+            *"Preserve"*)             cursor_pos=9 ;;
+            *"Luminosity"*)           cursor_pos=10 ;;
+            *"Algorithm"*)            cursor_pos=11 ;;
+            *"Radius"*)               cursor_pos=12 ;;
+            *"Shape"*)                cursor_pos=13 ;;
+            *"Nearest"*)              cursor_pos=14 ;;
+            *"Hald"*)                 cursor_pos=15 ;;
+            *"Reset"*)                cursor_pos=16 ;;
+        esac
+
+        case "$item" in
+            ""*)
+                save_config
+                return 0
+                ;;
+            *"Colors Limit"*)
+                local val
+                val=$(printf "All\n8\n4\n2" | fzf --prompt="  Palette Colors Limit ❯ " --header="Current: $PALETTE_LIMIT | [ENTER]: Confirm | [ESC]: Cancel")
+                if [[ -n "$val" ]]; then
+                    PALETTE_LIMIT="$val"
+                    echo -e "${C_GREEN}[OK] Palette Colors Limit → $PALETTE_LIMIT${C_RESET}"
+                    sleep 0.4
+                fi
+                continue
+                ;;
+            *"Palette Colors"*)
+                pick_palette_colors
+                continue
+                ;;
+            *"Palette"*)
+                pick_palette_interactive
+                continue
+                ;;
+            *"Color Strength"*)
+                local val
+                val=$(prompt_setting_value "  Color Strength (%)" "$COLOR_STRENGTH" "100 95 90 85 80 75 70 60 50 40 30 20 10" "^[0-9]+$")
+                if [[ -n "$val" ]]; then
+                    val=$((10#$val))
+                    if (( val >= 10 && val <= 100 )); then
+                        COLOR_STRENGTH="$val"
+                        echo -e "${C_GREEN}[OK] Color Strength → ${COLOR_STRENGTH}%${C_RESET}"
+                        sleep 0.4
+                    fi
+                fi
+                continue
+                ;;
+            *"Saturation"*)
+                local val
+                val=$(prompt_setting_value "󰅚 Saturation (%)" "$SATURATION" "100 110 120 130 140 150 90 80 70 60 50 0" "^[0-9]+$")
+                if [[ -n "$val" ]]; then
+                    val=$((10#$val))
+                    if (( val >= 0 && val <= 200 )); then
+                        SATURATION="$val"
+                        echo -e "${C_GREEN}[OK] Saturation → ${SATURATION}%${C_RESET}"
+                        sleep 0.4
+                    fi
+                fi
+                continue
+                ;;
+            *"Contrast"*)
+                local val
+                val=$(prompt_setting_value "󰃠 Contrast" "$CONTRAST" "0 5 10 15 20 25 30 -5 -10 -15 -20" "^-?[0-9]+$")
+                if [[ -n "$val" && "$val" -ge -50 && "$val" -le 50 ]]; then
+                    CONTRAST="$val"
+                    echo -e "${C_GREEN}[OK] Contrast → ${CONTRAST}${C_RESET}"
+                    sleep 0.4
+                fi
+                continue
+                ;;
+            *"Brightness"*)
+                local val
+                val=$(prompt_setting_value "󰃟 Brightness (%)" "$BRIGHTNESS" "100 105 110 115 120 95 90 85 80" "^[0-9]+$")
+                if [[ -n "$val" ]]; then
+                    val=$((10#$val))
+                    if (( val >= 50 && val <= 150 )); then
+                        BRIGHTNESS="$val"
+                        echo -e "${C_GREEN}[OK] Brightness → ${BRIGHTNESS}%${C_RESET}"
+                        sleep 0.4
+                    fi
+                fi
+                continue
+                ;;
+            *"Preserve luminosity"*)
+                [[ "$PRESERVE" == "true" ]] && PRESERVE="false" || PRESERVE="true"
+                echo -e "${C_GREEN}[OK] Preserve luminosity → $PRESERVE${C_RESET}"
+                sleep 0.4
+                continue
+                ;;
+            *"Luminosity factor"*)
+                local val
+                val=$(prompt_setting_value "󰃞 Luminosity factor" "$LUM" "1.0 0.70 0.80 0.90 1.10 1.20 1.50 2.0" "^[0-9]+([.][0-9]+)?$")
+                if [[ -n "$val" ]]; then
+                    LUM="$val"
+                    echo -e "${C_GREEN}[OK] Luminosity factor → $LUM${C_RESET}"
+                    sleep 0.4
+                fi
+                continue
+                ;;
+            *"Algorithm"*)
+                local val
+                val=$(printf "gaussian-blur\ngaussian-rbf\nshepards\nnearest-neighbor" | fzf --prompt="  Algorithm ❯ " --header="Current: $ALGORITHM | [ENTER]: Confirm | [ESC]: Cancel")
+                if [[ -n "$val" ]]; then
+                    ALGORITHM="$val"
+                    echo -e "${C_GREEN}[OK] Algorithm → $ALGORITHM${C_RESET}"
+                    sleep 0.4
+                fi
+                continue
+                ;;
+            *"Radius"*)
+                local val
+                val=$(prompt_setting_value "Radius (blur)" "$RADIUS" "8.0 4.0 6.0 10.0 12.0 16.0 2.0" "^[0-9]+([.][0-9]+)?$")
+                if [[ -n "$val" ]]; then
+                    RADIUS="$val"
+                    echo -e "${C_GREEN}[OK] Radius → $RADIUS${C_RESET}"
+                    sleep 0.4
+                fi
+                continue
+                ;;
+            *"Shape"*)
+                local val
+                val=$(prompt_setting_value "Shape (RBF)" "$SHAPE" "128.0 64.0 96.0 160.0 192.0 256.0" "^[0-9]+([.][0-9]+)?$")
+                if [[ -n "$val" ]]; then
+                    SHAPE="$val"
+                    echo -e "${C_GREEN}[OK] Shape → $SHAPE${C_RESET}"
+                    sleep 0.4
+                fi
+                continue
+                ;;
+            *"Nearest"*)
+                local val
+                val=$(prompt_setting_value "Nearest colors" "$NEAREST" "16 8 12 24 32 4" "^[0-9]+$")
+                if [[ -n "$val" ]]; then
+                    NEAREST="$val"
+                    echo -e "${C_GREEN}[OK] Nearest colors → $NEAREST${C_RESET}"
+                    sleep 0.4
+                fi
+                continue
+                ;;
+            *"Hald"*)
+                local val
+                val=$(prompt_setting_value "Hald CLUT level" "$LEVEL" "10 8 12 14 16 6" "^([2-9]|1[0-6])$")
+                if [[ -n "$val" ]]; then
+                    LEVEL="$val"
+                    echo -e "${C_GREEN}[OK] Hald CLUT level → $LEVEL${C_RESET}"
+                    sleep 0.4
+                fi
+                continue
+                ;;
+            *"Reset"*)
+                reset_settings
+                SELECTED_COLORS=()
+                echo -e "${C_CYAN}[i] Settings reset to defaults.${C_RESET}"
+                sleep 0.6
+                continue
+                ;;
+        esac
+    done
+}
+menu_processing_settings() {
+    interactive_tune_settings "" "Global Defaults"
+}
+
+run_lutgen_apply() {
+    local src="$1"
+    local dest="$2"
+    local theme="$3"
+    shift 3
+    local -a custom_colors=("$@")
+
+    local -a p_opt=()
+    local -a c_args=()
+    local -a sorted_palette=($(get_palette_colors_sorted "$theme"))
+
+    if [[ ${#custom_colors[@]} -gt 0 ]]; then
+        c_args=(-- "${custom_colors[@]}")
+    else
+        case "${PALETTE_LIMIT:-All}" in
+            2)
+                if [[ ${#sorted_palette[@]} -ge 2 ]]; then
+                    c_args=(-- "${sorted_palette[0]}" "${sorted_palette[-1]}")
+                else
+                    p_opt=(-p "${theme,,}")
+                fi
+                ;;
+            4)
+                if [[ ${#sorted_palette[@]} -ge 4 ]]; then
+                    local n=${#sorted_palette[@]}
+                    c_args=(-- "${sorted_palette[0]}" "${sorted_palette[$(( n / 3 ))]}" "${sorted_palette[$(( (2 * n) / 3 ))]}" "${sorted_palette[$(( n - 1 ))]}")
+                else
+                    c_args=(-- "${sorted_palette[@]}")
+                fi
+                ;;
+            8)
+                if [[ ${#sorted_palette[@]} -ge 8 ]]; then
+                    local n=${#sorted_palette[@]}
+                    local -a subset=()
+                    for ((k=0; k<8; k++)); do
+                        subset+=("${sorted_palette[$(( (k * (n - 1)) / 7 ))]}")
+                    done
+                    c_args=(-- "${subset[@]}")
+                else
+                    c_args=(-- "${sorted_palette[@]}")
+                fi
+                ;;
+            *)
+                local candidate="${theme,,}"
+                if lutgen palette "$candidate" &>/dev/null; then
+                    p_opt=(-p "$candidate")
+                elif lutgen palette "${candidate}-dark" &>/dev/null; then
+                    p_opt=(-p "${candidate}-dark")
+                else
+                    if [[ ${#sorted_palette[@]} -gt 0 ]]; then
+                        c_args=(-- "${sorted_palette[@]}")
+                    else
+                        p_opt=(-p "$candidate")
+                    fi
+                fi
+                ;;
+        esac
+    fi
+
+    lutgen apply "${LUTGEN_ARGS[@]}" "${p_opt[@]}" "$src" -o "$dest" "${c_args[@]}"
+}
+
+abs_path() { realpath -m "$1" 2>/dev/null || printf '%s' "$1"; }
+
+compute_settings_stamp() {
+    local theme="$1"
+    printf '%s' "${theme}#${LUTGEN_ARGS[*]}#${SELECTED_COLORS[*]}#${COLOR_STRENGTH}#${SATURATION}#${CONTRAST}#${BRIGHTNESS}#${PALETTE_LIMIT}#${IM_CMD}" | md5sum | cut -d' ' -f1
+}
+
+prune_stamps() {
+    local f line dest
+    for f in "$STAMPS_DIR"/*; do
+        [[ -f "$f" ]] || continue
+        line=$(< "$f")
+        dest="${line#* }"
+        [[ -n "$dest" && ! -f "$dest" ]] && rm -f "$f"
+    done
+}
 
 process_image() {
     local src="$1" dest="$2" theme="$3"
-    
-    # // If destination is newer than source, skip processing to save time
-    if [[ -f "$dest" && ! "$src" -nt "$dest" ]]; then
+    local dest_abs key stamp_file stamp
+    dest_abs=$(abs_path "$dest")
+    key=$(printf '%s' "$dest_abs" | md5sum | cut -d' ' -f1)
+    stamp_file="$STAMPS_DIR/$key"
+    stamp=$(compute_settings_stamp "$theme")
+    mkdir -p "$STAMPS_DIR"
+
+    if [[ -f "$dest" && ! "$src" -nt "$dest" && -f "$stamp_file" && "$(< "$stamp_file")" == "$stamp $dest_abs" ]]; then
         return 1
     fi
-    
+
     mkdir -p "$(dirname "$dest")"
     cp "$src" "$dest"
-    
+
     local tmp="${dest}_lutgen_tmp.${dest##*.}"
-    if lutgen apply -p "${theme,,}" "$dest" -o "$tmp" &>/dev/null; then
+    local err_file
+    err_file=$(mktemp)
+
+    if run_lutgen_apply "$dest" "$tmp" "$theme" "${SELECTED_COLORS[@]}" &>"$err_file"; then
         mv "$tmp" "$dest"
+        rm -f "$err_file"
+        printf '%s %s' "$stamp" "$dest_abs" > "$stamp_file"
+
+        if (( 10#$COLOR_STRENGTH < 100 )); then
+            "$IM_CMD" "$src" "$dest" -define compose:args="$COLOR_STRENGTH" -compose blend -composite "$dest" 2>/dev/null
+        fi
+
+        if [[ "$SATURATION" != "100" || "$CONTRAST" != "0" || "$BRIGHTNESS" != "100" ]]; then
+            "$IM_CMD" "$dest" -modulate "${BRIGHTNESS},${SATURATION},100" -brightness-contrast "0x${CONTRAST}" "$dest" 2>/dev/null
+        fi
+
         return 0
     else
-        rm -f "$tmp"
+        rm -f "$tmp" "$dest" "$stamp_file"
+        echo -e "${C_RED}[ERROR] lutgen failed for '$src':${C_RESET}" >&2
+        sed 's/^/  /' "$err_file" >&2
+        rm -f "$err_file"
         return 2
     fi
 }
 
-# // Local palette editor
+process_batch() {
+    local theme="$1" mode="$2" source_dir="$3"
+    shift 3
+    local -a files=("$@")
+    ((${#files[@]} == 0)) && return 0
+
+    local status_dir
+    status_dir=$(mktemp -d)
+    local i=0 running=0 img dest
+
+    for img in "${files[@]}"; do
+        if [[ "$mode" == "folder" ]]; then
+            dest="$DEST_FINAL/${img#"$source_dir"/}"
+        else
+            dest="$DEST_FINAL/$(basename "$img")"
+        fi
+        (
+            process_image "$img" "$dest" "$theme"
+            printf '%s' "$?" > "$status_dir/$i"
+        ) &
+        running=$((running + 1))
+        if (( running >= MAX_JOBS )); then
+            wait -n
+            running=$((running - 1))
+        fi
+        i=$((i + 1))
+    done
+    wait
+
+    local s
+    for s in "$status_dir"/*; do
+        case "$(< "$s")" in
+            0) count_ok=$((count_ok + 1));;
+            1) count_skip=$((count_skip + 1));;
+            *) count_err=$((count_err + 1));;
+        esac
+    done
+    rm -rf "$status_dir"
+}
+
 menu_settings() {
-    mapfile -t schemes < <(find "$LUTGEN_DIR" -maxdepth 1 -type f ! -name "*.toml" ! -name ".synced" -exec basename {} \; | sort)
-    
-    local selected=$(printf "%s\n" "${schemes[@]}" | fzf \
-        --prompt="  Edit Local Palette ❯ " \
+    mapfile -t schemes < <(find "$LUTGEN_DIR" -maxdepth 1 -type f ! -name "*.toml" ! -name ".synced" ! -name "$CONFIG_NAME" -exec basename {} \; | sort)
+
+    local selected
+    selected=$(printf "%s\n" "${schemes[@]}" | fzf \
+        --prompt="  Edit Local Palette ❯ " \
         --header="[ENTER]: Edit  |  [ESC]: Back to menu" \
         --preview "'$PREVIEW_SCRIPT' '$LUTGEN_DIR' {}" \
         --preview-window=right:50%:border-left)
@@ -214,27 +1206,24 @@ menu_settings() {
     fi
 }
 
-
-# /*
-#  * MAIN WORKFLOW (STATE MACHINE)
-#  */
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 
 check_deps
+load_config
+mkdir -p "$STAMPS_DIR"
+prune_stamps
 sync_palettes "false"
 
 STATE="MAIN"
 
-# // Main application loop
 while true; do
     case "$STATE" in
         "MAIN")
-            # // Binding q:abort here allows quick exit without breaking text search in other menus
-            MAIN_CHOICE=$(printf "1. Process full folder\n2. Individual selection (fzf)\n3. Force palette update\n4. Settings (View/Edit local palettes)\nq. Exit" | \
+            MAIN_CHOICE=$(printf "1. Process full folder\n2. Individual selection (fzf)\n3. Force palette update\n4. Edit local palettes\n5. Processing Settings (Algorithm/Brightness/Saturation)\nq. Exit" | \
                 fzf --prompt="[ 󰏘 LUTGEN RICER ] ❯ " \
                     --header="[q / ESC]: Exit" \
                     --bind="q:abort")
-            
-            # // If ESC or 'q' is pressed, exit gracefully
+
             if [[ -z "$MAIN_CHOICE" ]]; then
                 echo -e "${C_YELLOW}Exiting Ricer...${C_RESET}"
                 exit 0
@@ -245,6 +1234,7 @@ while true; do
                 2*) SOURCE_MODE="Individual"; STATE="SOURCE" ;;
                 3*) sync_palettes "true"; STATE="MAIN" ;;
                 4*) menu_settings; STATE="MAIN" ;;
+                5*) menu_processing_settings; STATE="MAIN" ;;
                 q*) echo -e "${C_YELLOW}Exiting...${C_RESET}"; exit 0 ;;
             esac
             ;;
@@ -252,67 +1242,66 @@ while true; do
         "SOURCE")
             if [[ "$SOURCE_MODE" == "Full folder" ]]; then
                 mapfile -t folders < <(find . -maxdepth 1 -type d ! -name "." ! -name ".*" | sed 's|^\./||' | sort)
-                SOURCE_DIR=$(printf "%s\n" "${folders[@]}" | fzf --prompt="  Source folder ❯ " --header="[ESC]: Back")
-                
-                # // Handle backtracking
+                SOURCE_DIR=$(printf "%s\n" "${folders[@]}" | fzf --prompt="  Source folder ❯ " --header="[ESC]: Back")
+
                 [[ -z "$SOURCE_DIR" ]] && { STATE="MAIN"; continue; }
+
+                mapfile -t folder_images < <(find "$SOURCE_DIR" -type f \( "${IMG_PATTERN[@]}" \) | sed 's|^\./||' | sort)
+                if [[ ${#folder_images[@]} -eq 0 ]]; then
+                    echo -e "${C_RED}[!] No images found in '$SOURCE_DIR'.${C_RESET}"
+                    sleep 1.5
+                    STATE="SOURCE"
+                    continue
+                fi
+
+                SAMPLE_WALLPAPER=$(printf "%s\n" "${folder_images[@]}" | fzf \
+                    --prompt="  Select Sample Image to Preview & Tune ❯ " \
+                    --header="[ENTER]: Pick reference image for tuning | [ESC]: Back" \
+                    --preview 'chafa -f sixel -s "${FZF_PREVIEW_COLUMNS}x${FZF_PREVIEW_LINES}" {} 2>/dev/null || chafa {}' \
+                    --preview-window=right:55%:border-left)
+
+                [[ -z "$SAMPLE_WALLPAPER" ]] && { STATE="SOURCE"; continue; }
             else
                 mapfile -t SELECTED_FILES < <(find . -type f \( "${IMG_PATTERN[@]}" \) | sed 's|^\./||' | sort | \
                     fzf --multi \
                         --prompt="  Select images ❯ " \
                         --header="[TAB]: Toggle | [CTRL-A]: Select All | [ESC]: Back" \
                         --bind="ctrl-a:select-all,ctrl-d:deselect-all,ctrl-t:toggle-all" \
-                        --preview 'chafa -f sixel -s "${FZF_PREVIEW_COLUMNS}x${FZF_PREVIEW_LINES}" {}' \
+                        --preview 'chafa -f sixel -s "${FZF_PREVIEW_COLUMNS}x${FZF_PREVIEW_LINES}" {} 2>/dev/null || chafa {}' \
                         --preview-window=right:55%:border-left)
-                
+
                 [[ ${#SELECTED_FILES[@]} -eq 0 ]] && { STATE="MAIN"; continue; }
                 SOURCE_DIR="Individual"
+
+                if [[ ${#SELECTED_FILES[@]} -gt 1 ]]; then
+                    SAMPLE_WALLPAPER=$(printf "%s\n" "${SELECTED_FILES[@]}" | fzf \
+                        --prompt="  Select Sample Image to Preview & Tune ❯ " \
+                        --header="[ENTER]: Pick reference image for tuning | [ESC]: Back" \
+                        --preview 'chafa -f sixel -s "${FZF_PREVIEW_COLUMNS}x${FZF_PREVIEW_LINES}" {} 2>/dev/null || chafa {}' \
+                        --preview-window=right:55%:border-left)
+                    [[ -z "$SAMPLE_WALLPAPER" ]] && { STATE="SOURCE"; continue; }
+                else
+                    SAMPLE_WALLPAPER="${SELECTED_FILES[0]}"
+                fi
             fi
-            STATE="PALETTE_TYPE"
+            STATE="TUNE_SETTINGS"
             ;;
 
-        "PALETTE_TYPE")
-            PALETTE_TYPE=$(printf "1. Custom (Local Repository)\n2. Built-in (Lutgen Native)" | fzf --prompt="  Palette Source ❯ " --header="[ESC]: Back")
-            [[ -z "$PALETTE_TYPE" ]] && { STATE="SOURCE"; continue; }
-            STATE="PALETTE_SEL"
-            ;;
+        "TUNE_SETTINGS")
+            context_name="Folder: $SOURCE_DIR"
+            [[ "$SOURCE_MODE" == "Individual" ]] && context_name=$(basename "$SAMPLE_WALLPAPER")
 
-        "PALETTE_SEL")
-            if [[ "$PALETTE_TYPE" == 1* ]]; then
-                mapfile -t schemes < <(find "$LUTGEN_DIR" -maxdepth 1 -type f ! -name "*.toml" ! -name ".synced" -exec basename {} \; | sed -E 's/-(dark|light)$//' | sort -u)
-                
-                SELECTED_PALETTE=$(printf "%s\n" "${schemes[@]}" | fzf \
-                    --prompt="  Select Custom Palette ❯ " \
-                    --header="[ESC]: Back" \
-                    --preview "'$PREVIEW_SCRIPT' '$LUTGEN_DIR' {}" \
-                    --preview-window=right:50%:border-left)
-                
-                [[ -z "$SELECTED_PALETTE" ]] && { STATE="PALETTE_TYPE"; continue; }
-                
-                generate_toml
-                THEME_DARK="${SELECTED_PALETTE}-dark"
-                THEME_LIGHT="${SELECTED_PALETTE}-light"
-                DEST_BASE="$SELECTED_PALETTE"
+            if interactive_tune_settings "$SAMPLE_WALLPAPER" "$context_name"; then
+                resolve_theme_variants
+                STATE="VARIANT"
             else
-                mapfile -t lutgen_schemes < <(lutgen palette names | sort)
-                
-                THEME_DARK=$(printf "%s\n" "${lutgen_schemes[@]}" | fzf \
-                    --prompt="󰏘  Select Built-in Palette ❯ " \
-                    --header="[ESC]: Back" \
-                    --preview "'$LUTGEN_PREVIEW_SCRIPT' {}" \
-                    --preview-window=right:50%:border-left)
-                
-                [[ -z "$THEME_DARK" ]] && { STATE="PALETTE_TYPE"; continue; }
-                
-                THEME_LIGHT="$THEME_DARK"
-                DEST_BASE="$THEME_DARK"
+                STATE="SOURCE"
             fi
-            STATE="VARIANT"
             ;;
 
         "VARIANT")
-            VAR_CHOICE=$(printf "Dark\nLight\nBoth" | fzf --prompt="  Variant to generate ❯ " --header="[ESC]: Back")
-            [[ -z "$VAR_CHOICE" ]] && { STATE="PALETTE_SEL"; continue; }
+            VAR_CHOICE=$(printf "Dark\nLight\nBoth" | fzf --prompt="  Variant to generate ❯ " --header="[ESC]: Back to tuning")
+            [[ -z "$VAR_CHOICE" ]] && { STATE="TUNE_SETTINGS"; continue; }
 
             case "$VAR_CHOICE" in
                 Dark) VARIANT_LIST=("dark") ;;
@@ -325,37 +1314,36 @@ while true; do
         "PROCESS")
             count_ok=0; count_skip=0; count_err=0
 
+            build_lutgen_args
+
+            echo -e "${C_CYAN}    Parallel jobs: $MAX_JOBS (override with MAX_JOBS=N)${C_RESET}"
+
             for var in "${VARIANT_LIST[@]}"; do
                 current_theme=$([[ "$var" == "dark" ]] && echo "$THEME_DARK" || echo "$THEME_LIGHT")
-                DEST_FINAL="$DEST_BASE/$SOURCE_DIR/$var"
-                
+
+                if [[ "$SOURCE_MODE" == "Individual" ]]; then
+                    DEST_FINAL="$DEST_BASE/$var"
+                else
+                    DEST_FINAL="$DEST_BASE/$SOURCE_DIR/$var"
+                fi
+
                 mkdir -p "$DEST_FINAL"
                 echo -e "\n${C_BLUE}[*] Generating variant '$var' in '$DEST_FINAL'...${C_RESET}"
 
                 if [[ "$SOURCE_MODE" == "Full folder" ]]; then
-                    # // Batch processing using find (safer than ls for weird filenames)
-                    while IFS= read -r img; do
-                        rel="${img#"$SOURCE_DIR"/}"
-                        dest="$DEST_FINAL/$rel"
-                        process_image "$img" "$dest" "$current_theme"
-                        case $? in 0) ((count_ok++));; 1) ((count_skip++));; *) ((count_err++));; esac
-                    done < <(find "$SOURCE_DIR" -type f \( "${IMG_PATTERN[@]}" \))
+                    mapfile -t batch_files < <(find "$SOURCE_DIR" -type f \( "${IMG_PATTERN[@]}" \))
+                    process_batch "$current_theme" "folder" "$SOURCE_DIR" "${batch_files[@]}"
                 else
-                    # // Process manual fzf selection
-                    for img in "${SELECTED_FILES[@]}"; do
-                        dest="$DEST_FINAL/$(basename "$img")"
-                        process_image "$img" "$dest" "$current_theme"
-                        case $? in 0) ((count_ok++));; 1) ((count_skip++));; *) ((count_err++));; esac
-                    done
+                    process_batch "$current_theme" "individual" "" "${SELECTED_FILES[@]}"
                 fi
             done
 
-            # // Final summary
             echo -e "\n${C_GREEN}[OK] Process completed successfully.${C_RESET}"
             echo -e "${C_CYAN}    Generated: $count_ok  |  Skipped (Cache): $count_skip  |  Errors: $count_err${C_RESET}\n"
-            
-            # // Clean exit after processing is done
+
             exit 0
             ;;
     esac
 done
+
+fi
